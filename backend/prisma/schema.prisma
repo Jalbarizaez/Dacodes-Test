@@ -1,0 +1,529 @@
+// Prisma Schema for DaCodes Inventory System
+// This is the main schema file that defines all database models
+
+generator client {
+  provider = "prisma-client-js"
+  // Generate types in a predictable location
+  output   = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// AUTHENTICATION & USERS
+// ============================================================================
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  OPERATOR
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  firstName    String?  @map("first_name")
+  lastName     String?  @map("last_name")
+  role         UserRole
+  isActive     Boolean  @default(true) @map("is_active")
+  lastLoginAt  DateTime? @map("last_login_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  movements              StockMovement[]
+  transfersRequested     StockTransfer[] @relation("TransferRequester")
+  transfersApproved      StockTransfer[] @relation("TransferApprover")
+  auditLogs              AuditLog[]
+
+  @@index([email])
+  @@index([role])
+  @@map("users")
+}
+
+// ============================================================================
+// PRODUCT CATALOG
+// ============================================================================
+
+model Category {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  parentId    String?  @map("parent_id")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  parent   Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  children Category[] @relation("CategoryHierarchy")
+  products Product[]
+
+  @@index([name])
+  @@index([parentId])
+  @@index([isActive])
+  @@map("categories")
+}
+
+model Product {
+  id            String   @id @default(uuid())
+  sku           String   @unique
+  name          String
+  description   String?
+  categoryId    String   @map("category_id")
+  unitOfMeasure String   @map("unit_of_measure")
+  minStock      Int?     @map("min_stock") // Minimum stock level
+  maxStock      Int?     @map("max_stock") // Maximum stock level
+  weight        Decimal? @db.Decimal(10, 3) // Weight in kg
+  dimensions    String? // Dimensions as JSON string (length x width x height)
+  barcode       String?  @unique
+  isActive      Boolean  @default(true) @map("is_active")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  category              Category                @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  stockLevels           StockLevel[]
+  purchaseOrderItems    PurchaseOrderLineItem[]
+  movements             StockMovement[]
+  batches               Lot[]
+  reorderRule           ReorderRule?
+  transferItems         StockTransferItem[]
+
+  @@index([sku])
+  @@index([categoryId])
+  @@index([barcode])
+  @@index([isActive])
+  @@index([name]) // For search
+  @@map("products")
+}
+
+// ============================================================================
+// WAREHOUSE MANAGEMENT
+// ============================================================================
+
+model Warehouse {
+  id        String   @id @default(uuid())
+  name      String
+  address   String
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  locations Location[]
+
+  @@index([name])
+  @@map("warehouses")
+}
+
+model Location {
+  id          String   @id @default(uuid())
+  warehouseId String   @map("warehouse_id")
+  code        String
+  name        String? // Optional friendly name
+  type        String? // e.g., "shelf", "bin", "pallet"
+  capacity    Int?
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  warehouse              Warehouse           @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  stockLevels            StockLevel[]
+  movements              StockMovement[]
+  lotStocks              LotStock[]
+  transfersFrom          StockTransfer[]     @relation("SourceLocation")
+  transfersTo            StockTransfer[]     @relation("DestinationLocation")
+
+  @@unique([warehouseId, code])
+  @@index([warehouseId])
+  @@index([code])
+  @@map("locations")
+}
+
+// ============================================================================
+// STOCK MANAGEMENT
+// ============================================================================
+
+enum StockStatus {
+  AVAILABLE // Stock disponible para venta/uso
+  RESERVED // Stock reservado para órdenes
+  DAMAGED // Stock dañado
+  QUARANTINE // Stock en cuarentena (pendiente inspección)
+}
+
+model StockLevel {
+  id                String      @id @default(uuid())
+  productId         String      @map("product_id")
+  locationId        String      @map("location_id")
+  quantityAvailable Int         @default(0) @map("quantity_available")
+  quantityReserved  Int         @default(0) @map("quantity_reserved")
+  quantityDamaged   Int         @default(0) @map("quantity_damaged")
+  quantityTotal     Int         @default(0) @map("quantity_total") // Computed: available + reserved + damaged
+  lastCountDate     DateTime?   @map("last_count_date") // Last physical count
+  updatedAt         DateTime    @updatedAt @map("updated_at")
+
+  // Relations
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  location Location @relation(fields: [locationId], references: [id], onDelete: Restrict)
+
+  @@unique([productId, locationId])
+  @@index([productId])
+  @@index([locationId])
+  @@index([quantityAvailable]) // For low stock queries
+  @@map("stock_levels")
+}
+
+// ============================================================================
+// SUPPLIER MANAGEMENT
+// ============================================================================
+
+model Supplier {
+  id            String   @id @default(uuid())
+  name          String
+  contactName   String?  @map("contact_name")
+  email         String?
+  phone         String?
+  address       String?
+  paymentTerms  String?  @map("payment_terms")
+  leadTimeDays  Int      @default(0) @map("lead_time_days")
+  isActive      Boolean  @default(true) @map("is_active")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  purchaseOrders PurchaseOrder[]
+  lots           Lot[]
+
+  @@index([name])
+  @@index([isActive])
+  @@map("suppliers")
+}
+
+// ============================================================================
+// PURCHASE ORDERS
+// ============================================================================
+
+enum PurchaseOrderStatus {
+  DRAFT
+  SUBMITTED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+model PurchaseOrder {
+  id                   String              @id @default(uuid())
+  orderNumber          String              @unique @map("order_number")
+  supplierId           String              @map("supplier_id")
+  orderDate            DateTime            @map("order_date")
+  expectedDeliveryDate DateTime            @map("expected_delivery_date")
+  status               PurchaseOrderStatus @default(DRAFT)
+  totalValue           Decimal             @db.Decimal(10, 2) @map("total_value")
+  createdAt            DateTime            @default(now()) @map("created_at")
+  updatedAt            DateTime            @updatedAt @map("updated_at")
+
+  // Relations
+  supplier   Supplier                @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  lineItems  PurchaseOrderLineItem[]
+  receptions Reception[]
+
+  @@index([orderNumber])
+  @@index([supplierId])
+  @@index([status])
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderLineItem {
+  id               String  @id @default(uuid())
+  purchaseOrderId  String  @map("purchase_order_id")
+  productId        String  @map("product_id")
+  quantity         Int
+  unitPrice        Decimal @db.Decimal(10, 2) @map("unit_price")
+  receivedQuantity Int     @default(0) @map("received_quantity")
+
+  // Relations
+  purchaseOrder  PurchaseOrder   @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  product        Product         @relation(fields: [productId], references: [id], onDelete: Restrict)
+  receptionItems ReceptionItem[]
+
+  @@index([purchaseOrderId])
+  @@index([productId])
+  @@map("purchase_order_line_items")
+}
+
+// ============================================================================
+// RECEPTIONS
+// ============================================================================
+
+model Reception {
+  id              String   @id @default(uuid())
+  purchaseOrderId String   @map("purchase_order_id")
+  receivedDate    DateTime @map("received_date")
+  receivedBy      String   @map("received_by")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  // Relations
+  purchaseOrder PurchaseOrder   @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict)
+  items         ReceptionItem[]
+
+  @@index([purchaseOrderId])
+  @@map("receptions")
+}
+
+model ReceptionItem {
+  id               String    @id @default(uuid())
+  receptionId      String    @map("reception_id")
+  lineItemId       String    @map("line_item_id")
+  receivedQuantity Int       @map("received_quantity")
+  locationId       String    @map("location_id")
+  batchNumber      String?   @map("batch_number")
+  expirationDate   DateTime? @map("expiration_date")
+
+  // Relations
+  reception Reception             @relation(fields: [receptionId], references: [id], onDelete: Cascade)
+  lineItem  PurchaseOrderLineItem @relation(fields: [lineItemId], references: [id], onDelete: Restrict)
+
+  @@index([receptionId])
+  @@index([lineItemId])
+  @@map("reception_items")
+}
+
+// ============================================================================
+// MOVEMENT TRACKING
+// ============================================================================
+
+enum MovementType {
+  RECEIPT // Recepción de mercancía
+  SHIPMENT // Salida/envío
+  ADJUSTMENT // Ajuste manual
+  TRANSFER_OUT // Salida por transferencia
+  TRANSFER_IN // Entrada por transferencia
+  EXPIRATION // Baja por expiración
+  DAMAGE // Baja por daño
+  RETURN // Devolución
+  RESERVATION // Reserva de stock
+  RELEASE // Liberación de reserva
+}
+
+model StockMovement {
+  id              String       @id @default(uuid())
+  type            MovementType
+  productId       String       @map("product_id")
+  locationId      String       @map("location_id")
+  lotId           String?      @map("lot_id") // Optional: link to lot
+  quantity        Int // Positive for increases, negative for decreases
+  fromStatus      StockStatus? @map("from_status") // Status before movement
+  toStatus        StockStatus? @map("to_status") // Status after movement
+  date            DateTime     @default(now())
+  userId          String       @map("user_id")
+  reason          String? // Human-readable reason
+  referenceType   String?      @map("reference_type") // e.g., "purchase_order", "transfer"
+  referenceId     String?      @map("reference_id") // ID of related document
+  notes           String? // Additional notes
+  runningBalance  Int          @map("running_balance") // Balance after this movement
+
+  // Relations
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  location Location @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  lot      Lot?     @relation(fields: [lotId], references: [id], onDelete: Restrict)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([productId])
+  @@index([locationId])
+  @@index([lotId])
+  @@index([date])
+  @@index([type])
+  @@index([referenceType, referenceId]) // For finding movements by reference
+  @@map("stock_movements")
+}
+
+// ============================================================================
+// TRANSFERS
+// ============================================================================
+
+enum TransferStatus {
+  PENDING // Pendiente de iniciar
+  IN_TRANSIT // En tránsito
+  COMPLETED // Completada
+  CANCELLED // Cancelada
+}
+
+model StockTransfer {
+  id                    String         @id @default(uuid())
+  transferNumber        String         @unique @map("transfer_number")
+  sourceLocationId      String         @map("source_location_id")
+  destinationLocationId String         @map("destination_location_id")
+  status                TransferStatus @default(PENDING)
+  requestedDate         DateTime       @map("requested_date")
+  shippedDate           DateTime?      @map("shipped_date")
+  completedDate         DateTime?      @map("completed_date")
+  requestedBy           String         @map("requested_by")
+  approvedBy            String?        @map("approved_by")
+  notes                 String?
+  createdAt             DateTime       @default(now()) @map("created_at")
+  updatedAt             DateTime       @updatedAt @map("updated_at")
+
+  // Relations
+  sourceLocation      Location            @relation("SourceLocation", fields: [sourceLocationId], references: [id], onDelete: Restrict)
+  destinationLocation Location            @relation("DestinationLocation", fields: [destinationLocationId], references: [id], onDelete: Restrict)
+  requestedByUser     User                @relation("TransferRequester", fields: [requestedBy], references: [id], onDelete: Restrict)
+  approvedByUser      User?               @relation("TransferApprover", fields: [approvedBy], references: [id], onDelete: Restrict)
+  items               StockTransferItem[]
+
+  @@index([transferNumber])
+  @@index([status])
+  @@index([sourceLocationId])
+  @@index([destinationLocationId])
+  @@index([requestedDate])
+  @@map("stock_transfers")
+}
+
+model StockTransferItem {
+  id                String   @id @default(uuid())
+  transferId        String   @map("transfer_id")
+  productId         String   @map("product_id")
+  lotId             String?  @map("lot_id")
+  quantityRequested Int      @map("quantity_requested")
+  quantityShipped   Int      @default(0) @map("quantity_shipped")
+  quantityReceived  Int      @default(0) @map("quantity_received")
+  notes             String?
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  // Relations
+  transfer StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  product  Product        @relation(fields: [productId], references: [id], onDelete: Restrict)
+  lot      Lot?           @relation(fields: [lotId], references: [id], onDelete: Restrict)
+
+  @@index([transferId])
+  @@index([productId])
+  @@index([lotId])
+  @@map("stock_transfer_items")
+}
+
+// ============================================================================
+// BATCH/LOT MANAGEMENT
+// ============================================================================
+
+model Lot {
+  id                String    @id @default(uuid())
+  lotNumber         String    @unique @map("lot_number")
+  productId         String    @map("product_id")
+  manufacturingDate DateTime? @map("manufacturing_date")
+  expirationDate    DateTime? @map("expiration_date")
+  isExpired         Boolean   @default(false) @map("is_expired")
+  supplierId        String?   @map("supplier_id") // Optional: track supplier
+  notes             String?
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  // Relations
+  product       Product         @relation(fields: [productId], references: [id], onDelete: Restrict)
+  supplier      Supplier?       @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  lotStocks     LotStock[]
+  movements     StockMovement[]
+  transferItems StockTransferItem[]
+
+  @@index([lotNumber])
+  @@index([productId])
+  @@index([expirationDate])
+  @@index([isExpired])
+  @@map("lots")
+}
+
+model LotStock {
+  id         String @id @default(uuid())
+  lotId      String @map("lot_id")
+  locationId String @map("location_id")
+  quantity   Int
+
+  // Relations
+  lot      Lot      @relation(fields: [lotId], references: [id], onDelete: Cascade)
+  location Location @relation(fields: [locationId], references: [id], onDelete: Restrict)
+
+  @@unique([lotId, locationId])
+  @@index([lotId])
+  @@index([locationId])
+  @@map("lot_stocks")
+}
+
+// ============================================================================
+// REORDER RULES
+// ============================================================================
+
+model ReorderRule {
+  id              String   @id @default(uuid())
+  productId       String   @unique @map("product_id")
+  minimumQuantity Int      @map("minimum_quantity")
+  reorderQuantity Int      @map("reorder_quantity")
+  isEnabled       Boolean  @default(true) @map("is_enabled")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  product Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  alerts  ReorderAlert[]
+
+  @@index([isEnabled])
+  @@map("reorder_rules")
+}
+
+model ReorderAlert {
+  id                     String   @id @default(uuid())
+  reorderRuleId          String   @map("reorder_rule_id")
+  productId              String   @map("product_id")
+  currentStock           Int      @map("current_stock")
+  minimumQuantity        Int      @map("minimum_quantity")
+  suggestedOrderQuantity Int      @map("suggested_order_quantity")
+  createdAt              DateTime @default(now()) @map("created_at")
+  isResolved             Boolean  @default(false) @map("is_resolved")
+
+  // Relations
+  reorderRule ReorderRule @relation(fields: [reorderRuleId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+  @@index([isResolved])
+  @@index([createdAt])
+  @@map("reorder_alerts")
+}
+
+// ============================================================================
+// AUDIT LOGS
+// ============================================================================
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+  EXPORT
+  IMPORT
+}
+
+model AuditLog {
+  id          String      @id @default(uuid())
+  userId      String?     @map("user_id") // Nullable for system actions
+  action      AuditAction
+  entityType  String      @map("entity_type") // e.g., "product", "purchase_order"
+  entityId    String?     @map("entity_id") // ID of affected entity
+  oldValues   String?     @map("old_values") @db.Text // JSON string of old values
+  newValues   String?     @map("new_values") @db.Text // JSON string of new values
+  ipAddress   String?     @map("ip_address")
+  userAgent   String?     @map("user_agent")
+  description String? // Human-readable description
+  createdAt   DateTime    @default(now()) @map("created_at")
+
+  // Relations
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
