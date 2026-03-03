@@ -17,6 +17,7 @@ import { ReorderService } from '../../modules/reorder/reorder.service.js';
 import { prisma } from '../../config/database.js';
 
 describe('Complete Inventory Flow Integration Test', () => {
+  let productService: ProductService;
   let poService: PurchaseOrderService;
   let receptionService: ReceptionService;
   let movementService: MovementService;
@@ -25,6 +26,8 @@ describe('Complete Inventory Flow Integration Test', () => {
 
   let productId: string;
   let supplierId: string;
+  let warehouseAId: string;
+  let warehouseBId: string;
   let locationA1Id: string;
   let locationB1Id: string;
   let userId: string;

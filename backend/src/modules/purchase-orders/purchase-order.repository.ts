@@ -392,7 +392,11 @@ export class PurchaseOrderRepository {
     const where: Prisma.PurchaseOrderWhereInput = {};
 
     if (filters?.supplierId) where.supplierId = filters.supplierId;
-    if (filters?.status) where.status = filters.status;
+    if (filters?.status) {
+      where.status = Array.isArray(filters.status) 
+        ? { in: filters.status }
+        : filters.status;
+    }
 
     const [totalOrders, orders, aggregation] = await Promise.all([
       prisma.purchaseOrder.count({ where }),

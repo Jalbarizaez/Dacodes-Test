@@ -332,7 +332,7 @@ export class WarehouseService {
     // If warehouse has no locations, create a default one
     if (locations.length === 0) {
       try {
-        const defaultLocation = await this.repository.createLocation({
+        await this.repository.createLocation({
           warehouseId: warehouseId,
           code: 'DEFAULT',
           name: 'Ubicación Principal',
